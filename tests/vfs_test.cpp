@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -79,6 +81,61 @@ void Mo2Instance(const fs::path& tmp) {
     Check(v.Layers().size() == 4, "game Data, two mods, overwrite");
 }
 
+/// @brief Files held in memory, as a tool's overlay would.
+class MemoryOverlay final : public vfs::Overlay {
+public:
+    std::map<std::string, std::string> files;
+    std::vector<std::string> Paths() const override {
+        std::vector<std::string> out;
+        for (const auto& [p, text] : files) out.push_back(p);
+        return out;
+    }
+    std::optional<std::vector<std::uint8_t>> Read(std::string_view path, std::string* err) const override {
+        const auto it = files.find(std::string(path));
+        if (it == files.end()) {
+            if (err) *err = "gone";
+            return std::nullopt;
+        }
+        return std::vector<std::uint8_t>(it->second.begin(), it->second.end());
+    }
+};
+
+/// @brief Overlays win over loose files, the later-set one wins, and they come and go without re-opening.
+void Overlays(const fs::path& tmp) {
+    Write(tmp / "ov/meshes/a.nif", "loose");
+    Write(tmp / "ov/meshes/b.nif", "loose-b");
+    vfs::FileSystem v;
+    vfs::Options    o;
+    o.kind    = vfs::Options::Kind::Folders;
+    o.folders = { tmp / "ov" };
+    Check(v.Open(o), "open for overlays");
+    auto lower = std::make_shared<MemoryOverlay>();
+    lower->files["Meshes/A.nif"]   = "lower";
+    lower->files["meshes/new.nif"] = "new";
+    auto upper = std::make_shared<MemoryOverlay>();
+    upper->files["meshes/a.nif"] = "upper";
+    v.SetOverlay("lower", lower);
+    v.SetOverlay("upper", upper);
+    Check(Text(v.Read("MESHES/a.nif")) == "upper", "the later overlay wins");
+    Check(Text(v.Read("meshes/new.nif")) == "new", "an overlay adds a file");
+    Check(Text(v.Read("meshes/b.nif")) == "loose-b", "loose files show through");
+    Check(!v.LoosePath("meshes/a.nif").has_value(), "an overlaid file has no loose path");
+    Check(v.Providers("meshes/a.nif").size() == 3 && v.Winner("meshes/a.nif")->layer == "upper" && v.Winner("meshes/a.nif")->overlay,
+          "providers: loose, lower, upper");
+    Check(v.List("meshes").size() == 3, "listing merges overlays");
+    v.SetOverlay("lower", lower);
+    Check(Text(v.Read("meshes/a.nif")) == "upper", "replacing an overlay keeps its rank");
+    upper->files["meshes/c.nif"] = "c";
+    Check(!v.Exists("meshes/c.nif"), "an overlay's new file needs a refresh");
+    v.RefreshOverlay("upper");
+    Check(Text(v.Read("meshes/c.nif")) == "c", "refreshed");
+    Check(v.Open(o) && Text(v.Read("meshes/c.nif")) == "c", "overlays survive a re-open");
+    v.RemoveOverlay("upper");
+    Check(Text(v.Read("meshes/a.nif")) == "lower", "removing an overlay uncovers the one below");
+    v.RemoveOverlay("lower");
+    Check(Text(v.Read("meshes/a.nif")) == "loose" && !v.Exists("meshes/new.nif"), "all gone: back to loose");
+}
+
 /// @brief VFS_TEST_MO2 (a real MO2 instance) or VFS_TEST_DATA (a real Skyrim SE Data folder), optional: the vanilla
 ///        archives load and serve a known file.
 void RealData() {
@@ -105,6 +162,7 @@ int main() {
     fs::remove_all(tmp);
     LooseLayers(tmp);
     Mo2Instance(tmp);
+    Overlays(tmp);
     RealData();
     fs::remove_all(tmp);
     std::printf("%s: vfs-test, %d failure(s)\n", g_failures ? "FAIL" : "OK", g_failures);
