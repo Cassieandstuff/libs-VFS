@@ -118,6 +118,16 @@ public:
     std::optional<std::filesystem::path> LoosePath(std::string_view path) const;
     /// @brief Every file below `prefix` (a Data-relative folder; empty = all), as its winner spells it, sorted.
     std::vector<std::string> List(std::string_view prefix) const;
+    /// @brief One entry directly below a folder.
+    struct Entry {
+        std::string name;             ///< as its winner spells it (a folder: the first source seen that spells it)
+        bool        folder = false;
+    };
+    /// @brief What sits directly below `folder` (Data-relative; empty = the Data root): sub-folders first, then files,
+    ///        each sorted by key.
+    /// @note  A scan of every indexed path, so linear in the Data folder's size: a browser's per-folder query, not a
+    ///        loop's.
+    std::vector<Entry> Children(std::string_view folder) const;
     /// @brief The winner of `path`, or nullopt.
     std::optional<Provider> Winner(std::string_view path) const;
     /// @brief Every provider of `path`, LOWEST precedence first (the winner last).

@@ -348,6 +348,30 @@ std::vector<std::string> FileSystem::List(std::string_view prefix) const {
     return list;
 }
 
+std::vector<FileSystem::Entry> FileSystem::Children(std::string_view folder) const {
+    std::string p = Key(folder);
+    if (!p.empty() && p.back() != '/') p += '/';
+    std::map<std::string, std::string> folders, files;   ///< key -> spelling
+    const auto add = [&](const std::string& key, const std::string& spelledAs) {
+        if (!key.starts_with(p)) return;
+        /// @note A spelling keeps the key's length (Key only re-cases and re-slashes), so one cut serves both; one
+        ///       that does not (a leading slash) names its entry by the key.
+        const std::string& spelled = spelledAs.size() == key.size() ? spelledAs : key;
+        const std::size_t  slash   = key.find('/', p.size());
+        if (slash == std::string::npos) files[key] = spelled.substr(p.size());
+        else folders.try_emplace(key.substr(p.size(), slash - p.size()), spelled.substr(p.size(), slash - p.size()));
+    };
+    for (const auto& [k, hits] : m_impl->archived) add(k, hits.back().spelled);
+    for (const auto& [k, hits] : m_impl->loose) add(k, hits.back().spelled);
+    for (const auto& o : m_impl->overlays)
+        for (const auto& [k, spelled] : o.paths) add(k, spelled);
+    std::vector<Entry> out;
+    out.reserve(folders.size() + files.size());
+    for (auto& [k, name] : folders) out.push_back({ std::move(name), true });
+    for (auto& [k, name] : files) out.push_back({ std::move(name), false });
+    return out;
+}
+
 std::vector<Provider> FileSystem::Providers(std::string_view path) const {
     const std::string     k = Key(path);
     std::vector<Provider> out;

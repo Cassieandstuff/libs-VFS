@@ -123,6 +123,13 @@ void Overlays(const fs::path& tmp) {
     Check(v.Providers("meshes/a.nif").size() == 3 && v.Winner("meshes/a.nif")->layer == "upper" && v.Winner("meshes/a.nif")->overlay,
           "providers: loose, lower, upper");
     Check(v.List("meshes").size() == 3, "listing merges overlays");
+    lower->files["meshes/Sub/deep.nif"] = "deep";
+    v.RefreshOverlay("lower");
+    const auto top = v.Children("");
+    Check(top.size() == 1 && top[0].folder && top[0].name == "meshes", "one folder at the root");
+    const auto below = v.Children("MESHES");
+    Check(below.size() == 4 && below[0].folder && below[0].name == "Sub" && !below[1].folder, "a sub-folder, then the files");
+    Check(v.Children("meshes/sub").size() == 1, "a folder an overlay supplies");
     v.SetOverlay("lower", lower);
     Check(Text(v.Read("meshes/a.nif")) == "upper", "replacing an overlay keeps its rank");
     upper->files["meshes/c.nif"] = "c";
