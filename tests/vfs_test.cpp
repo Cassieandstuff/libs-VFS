@@ -120,6 +120,8 @@ void Overlays(const fs::path& tmp) {
     Check(Text(v.Read("meshes/new.nif")) == "new", "an overlay adds a file");
     Check(Text(v.Read("meshes/b.nif")) == "loose-b", "loose files show through");
     Check(!v.LoosePath("meshes/a.nif").has_value(), "an overlaid file has no loose path");
+    Check(Text(v.ReadUnderlying("meshes/a.nif")) == "loose", "beneath the overlays: the loose file");
+    Check(!v.ReadUnderlying("meshes/new.nif"), "an overlay-only file has nothing beneath it");
     Check(v.Providers("meshes/a.nif").size() == 3 && v.Winner("meshes/a.nif")->layer == "upper" && v.Winner("meshes/a.nif")->overlay,
           "providers: loose, lower, upper");
     Check(v.List("meshes").size() == 3, "listing merges overlays");

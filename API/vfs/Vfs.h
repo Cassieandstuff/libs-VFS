@@ -113,6 +113,9 @@ public:
     bool Exists(std::string_view path) const;
     /// @brief The winning version of `path` (Data-relative, either slash, any case).
     std::optional<std::vector<std::uint8_t>> Read(std::string_view path, std::string* err = nullptr) const;
+    /// @brief The winning version of `path` beneath the overlays: what the Data folder itself holds (a loose file or an
+    ///        archive's), as if no tool streamed anything over it.
+    std::optional<std::vector<std::uint8_t>> ReadUnderlying(std::string_view path, std::string* err = nullptr) const;
     /// @brief The winning version's loose file on disk, or nullopt when it is archived, overlaid or absent (a plugin is
     ///        always loose).
     std::optional<std::filesystem::path> LoosePath(std::string_view path) const;

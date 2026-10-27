@@ -310,10 +310,16 @@ std::optional<fs::path> FileSystem::LoosePath(std::string_view path) const {
 std::optional<std::vector<std::uint8_t>> FileSystem::Read(std::string_view path, std::string* err) const {
     if (const auto k = Key(path); const Impl::Overlaid* o = m_impl->OverlayOf(k))
         return o->overlay->Read(o->paths.at(k), err);
-    if (const auto p = LoosePath(path)) {
-        std::ifstream f(*p, std::ios::binary);
+    return ReadUnderlying(path, err);
+}
+
+std::optional<std::vector<std::uint8_t>> FileSystem::ReadUnderlying(std::string_view path, std::string* err) const {
+    if (const auto hit = m_impl->loose.find(Key(path)); hit != m_impl->loose.end()) {
+        const Impl::Hit& w = hit->second.back();
+        const fs::path   p = m_impl->layers[w.source].root / P(w.spelled);
+        std::ifstream    f(p, std::ios::binary);
         if (!f) {
-            if (err) *err = "cannot open " + U8(*p);
+            if (err) *err = "cannot open " + U8(p);
             return std::nullopt;
         }
         return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(f), {});
