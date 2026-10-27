@@ -25,11 +25,24 @@ struct Layer {
     std::filesystem::path root;
 };
 
-/// @brief Where a file comes from: a layer's loose file, or an archive (named by file) a layer holds.
+/// @brief Where a file comes from: a layer's loose file, an archive (named by file) a layer holds, or an overlay.
 struct Provider {
-    std::string           layer;     ///< Layer::name
-    std::string           archive;   ///< the .bsa's file name; empty for a loose file
-    std::filesystem::path loose;     ///< the loose file on disk; empty for an archived one
+    std::string           layer;     ///< Layer::name, or the overlay's name
+    std::string           archive;   ///< the .bsa's file name; empty for a loose file or an overlay
+    std::filesystem::path loose;     ///< the loose file on disk; empty for an archived or overlaid one
+    bool                  overlay = false;
+};
+
+/// @brief A source of files at Data paths ranked ABOVE loose files and archives: what a tool streams over the Data
+///        folder (Community Behaviors' .hky load order, an editor's unsaved project).
+/// @note  Paths() is read when the overlay is added or refreshed; Read() runs on demand, from any thread a caller reads on.
+class Overlay {
+public:
+    virtual ~Overlay() = default;
+    /// @brief Every Data-relative path it supplies, as it spells them.
+    virtual std::vector<std::string> Paths() const = 0;
+    /// @brief The bytes of `path` (one of Paths()); nullopt with `err` set when it cannot produce them.
+    virtual std::optional<std::vector<std::uint8_t>> Read(std::string_view path, std::string* err) const = 0;
 };
 
 /// @brief A Mod Organizer 2 instance's view: the game's Data, the profile's enabled mods by priority, overwrite.
@@ -63,9 +76,10 @@ struct Options {
 const std::vector<std::string>& DefaultIniArchives();
 
 /// @brief The assembled Data folder.
-/// @note  Precedence: any loose file beats every archive; among loose files the higher layer wins; among archives the
-///        later-loaded wins (the ini lists first, then each plugin's in load order). Not thread-safe while building;
-///        Read is safe from several threads once built.
+/// @note  Precedence: overlays beat everything (the later-added overlay wins); then any loose file beats every archive;
+///        among loose files the higher layer wins; among archives the later-loaded wins (the ini lists first, then each
+///        plugin's in load order). Not thread-safe while building or changing overlays; Read is safe from several
+///        threads otherwise.
 class FileSystem {
 public:
     FileSystem();
@@ -84,6 +98,13 @@ public:
     std::size_t LoadArchives(const std::vector<std::string>& pluginsInOrder,
                              const std::vector<std::string>& iniArchives = DefaultIniArchives());
 
+    /// @brief Put `overlay` above everything added before it, under `name` (replacing an overlay of that name, in place).
+    void SetOverlay(const std::string& name, std::shared_ptr<const Overlay> overlay);
+    /// @brief Take the overlay `name` away (no-op when absent).
+    void RemoveOverlay(const std::string& name);
+    /// @brief Re-read overlay `name`'s Paths() (its files changed).
+    void RefreshOverlay(const std::string& name);
+
     const std::vector<Layer>&       Layers() const;
     const std::vector<std::string>& Warnings() const;
     /// @brief The MO2 profile it was opened over, or null.
@@ -92,11 +113,24 @@ public:
     bool Exists(std::string_view path) const;
     /// @brief The winning version of `path` (Data-relative, either slash, any case).
     std::optional<std::vector<std::uint8_t>> Read(std::string_view path, std::string* err = nullptr) const;
-    /// @brief The winning version's loose file on disk, or nullopt when it is archived or absent (a plugin is always
-    ///        loose).
+    /// @brief The winning version of `path` beneath the overlays: what the Data folder itself holds (a loose file or an
+    ///        archive's), as if no tool streamed anything over it.
+    std::optional<std::vector<std::uint8_t>> ReadUnderlying(std::string_view path, std::string* err = nullptr) const;
+    /// @brief The winning version's loose file on disk, or nullopt when it is archived, overlaid or absent (a plugin is
+    ///        always loose).
     std::optional<std::filesystem::path> LoosePath(std::string_view path) const;
     /// @brief Every file below `prefix` (a Data-relative folder; empty = all), as its winner spells it, sorted.
     std::vector<std::string> List(std::string_view prefix) const;
+    /// @brief One entry directly below a folder.
+    struct Entry {
+        std::string name;             ///< as its winner spells it (a folder: the first source seen that spells it)
+        bool        folder = false;
+    };
+    /// @brief What sits directly below `folder` (Data-relative; empty = the Data root): sub-folders first, then files,
+    ///        each sorted by key.
+    /// @note  A scan of every indexed path, so linear in the Data folder's size: a browser's per-folder query, not a
+    ///        loop's.
+    std::vector<Entry> Children(std::string_view folder) const;
     /// @brief The winner of `path`, or nullopt.
     std::optional<Provider> Winner(std::string_view path) const;
     /// @brief Every provider of `path`, LOWEST precedence first (the winner last).

@@ -160,6 +160,28 @@ struct FileSystem::Impl {
     std::unordered_map<std::string, std::vector<Hit>> loose;      ///< key -> hits, lowest layer first
     std::vector<Archive>                               archives;   ///< load order
     std::unordered_map<std::string, std::vector<Hit>> archived;   ///< key -> hits, load order
+    struct Overlaid {
+        std::string                                  name;
+        std::shared_ptr<const Overlay>               overlay;
+        std::unordered_map<std::string, std::string> paths;   ///< key -> its spelling
+    };
+    std::vector<Overlaid> overlays;   ///< lowest first
+
+    /// @brief The highest overlay supplying `key`, or null.
+    const Overlaid* OverlayOf(const std::string& key) const {
+        for (auto it = overlays.rbegin(); it != overlays.rend(); ++it)
+            if (it->paths.count(key)) return &*it;
+        return nullptr;
+    }
+
+    static void Reindex(Overlaid& o) {
+        o.paths.clear();
+        if (o.overlay)
+            for (auto& p : o.overlay->Paths()) {
+                std::string k = Key(p);
+                o.paths.emplace(std::move(k), Slashed(p));
+            }
+    }
 
     void Index(std::size_t layer) {
         std::error_code ec;
@@ -185,7 +207,10 @@ std::string FileSystem::Key(std::string_view path) {
 }
 
 bool FileSystem::Open(const Options& o, std::string* err) {
-    *m_impl = Impl{};
+    /// @note Overlays are not part of what is opened: they survive a re-Open.
+    auto overlays    = std::move(m_impl->overlays);
+    *m_impl          = Impl{};
+    m_impl->overlays = std::move(overlays);
     auto&        L   = m_impl->layers;
     switch (o.kind) {
     case Options::Kind::DataFolder: L.push_back({ "game Data", o.dataFolder }); break;
@@ -251,12 +276,31 @@ const std::vector<Layer>&       FileSystem::Layers() const { return m_impl->laye
 const std::vector<std::string>& FileSystem::Warnings() const { return m_impl->warnings; }
 const Mo2Profile*               FileSystem::Mo2() const { return m_impl->mo2 ? &*m_impl->mo2 : nullptr; }
 
+void FileSystem::SetOverlay(const std::string& name, std::shared_ptr<const Overlay> overlay) {
+    auto&      O  = m_impl->overlays;
+    const auto it = std::find_if(O.begin(), O.end(), [&](const Impl::Overlaid& o) { return o.name == name; });
+    Impl::Overlaid& o = it != O.end() ? *it : O.emplace_back();
+    o.name            = name;
+    o.overlay         = std::move(overlay);
+    Impl::Reindex(o);
+}
+
+void FileSystem::RemoveOverlay(const std::string& name) {
+    std::erase_if(m_impl->overlays, [&](const Impl::Overlaid& o) { return o.name == name; });
+}
+
+void FileSystem::RefreshOverlay(const std::string& name) {
+    for (auto& o : m_impl->overlays)
+        if (o.name == name) Impl::Reindex(o);
+}
+
 bool FileSystem::Exists(std::string_view path) const {
     const std::string k = Key(path);
-    return m_impl->loose.count(k) || m_impl->archived.count(k);
+    return m_impl->OverlayOf(k) || m_impl->loose.count(k) || m_impl->archived.count(k);
 }
 
 std::optional<fs::path> FileSystem::LoosePath(std::string_view path) const {
+    if (m_impl->OverlayOf(Key(path))) return std::nullopt;
     const auto it = m_impl->loose.find(Key(path));
     if (it == m_impl->loose.end()) return std::nullopt;
     const Impl::Hit& w = it->second.back();
@@ -264,10 +308,18 @@ std::optional<fs::path> FileSystem::LoosePath(std::string_view path) const {
 }
 
 std::optional<std::vector<std::uint8_t>> FileSystem::Read(std::string_view path, std::string* err) const {
-    if (const auto p = LoosePath(path)) {
-        std::ifstream f(*p, std::ios::binary);
+    if (const auto k = Key(path); const Impl::Overlaid* o = m_impl->OverlayOf(k))
+        return o->overlay->Read(o->paths.at(k), err);
+    return ReadUnderlying(path, err);
+}
+
+std::optional<std::vector<std::uint8_t>> FileSystem::ReadUnderlying(std::string_view path, std::string* err) const {
+    if (const auto hit = m_impl->loose.find(Key(path)); hit != m_impl->loose.end()) {
+        const Impl::Hit& w = hit->second.back();
+        const fs::path   p = m_impl->layers[w.source].root / P(w.spelled);
+        std::ifstream    f(p, std::ios::binary);
         if (!f) {
-            if (err) *err = "cannot open " + U8(*p);
+            if (err) *err = "cannot open " + U8(p);
             return std::nullopt;
         }
         return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(f), {});
@@ -292,11 +344,38 @@ std::vector<std::string> FileSystem::List(std::string_view prefix) const {
         if (k.starts_with(p)) out[k] = hits.back().spelled;
     for (const auto& [k, hits] : m_impl->loose)
         if (k.starts_with(p)) out[k] = hits.back().spelled;
+    for (const auto& o : m_impl->overlays)
+        for (const auto& [k, spelled] : o.paths)
+            if (k.starts_with(p)) out[k] = spelled;
     std::vector<std::string> list;
     list.reserve(out.size());
     for (auto& [k, spelled] : out) list.push_back(std::move(spelled));
     std::sort(list.begin(), list.end());
     return list;
+}
+
+std::vector<FileSystem::Entry> FileSystem::Children(std::string_view folder) const {
+    std::string p = Key(folder);
+    if (!p.empty() && p.back() != '/') p += '/';
+    std::map<std::string, std::string> folders, files;   ///< key -> spelling
+    const auto add = [&](const std::string& key, const std::string& spelledAs) {
+        if (!key.starts_with(p)) return;
+        /// @note A spelling keeps the key's length (Key only re-cases and re-slashes), so one cut serves both; one
+        ///       that does not (a leading slash) names its entry by the key.
+        const std::string& spelled = spelledAs.size() == key.size() ? spelledAs : key;
+        const std::size_t  slash   = key.find('/', p.size());
+        if (slash == std::string::npos) files[key] = spelled.substr(p.size());
+        else folders.try_emplace(key.substr(p.size(), slash - p.size()), spelled.substr(p.size(), slash - p.size()));
+    };
+    for (const auto& [k, hits] : m_impl->archived) add(k, hits.back().spelled);
+    for (const auto& [k, hits] : m_impl->loose) add(k, hits.back().spelled);
+    for (const auto& o : m_impl->overlays)
+        for (const auto& [k, spelled] : o.paths) add(k, spelled);
+    std::vector<Entry> out;
+    out.reserve(folders.size() + files.size());
+    for (auto& [k, name] : folders) out.push_back({ std::move(name), true });
+    for (auto& [k, name] : files) out.push_back({ std::move(name), false });
+    return out;
 }
 
 std::vector<Provider> FileSystem::Providers(std::string_view path) const {
@@ -306,6 +385,8 @@ std::vector<Provider> FileSystem::Providers(std::string_view path) const {
         for (const auto& h : it->second) out.push_back({ m_impl->archives[h.source].layer, m_impl->archives[h.source].name, {} });
     if (const auto it = m_impl->loose.find(k); it != m_impl->loose.end())
         for (const auto& h : it->second) out.push_back({ m_impl->layers[h.source].name, {}, m_impl->layers[h.source].root / P(h.spelled) });
+    for (const auto& o : m_impl->overlays)
+        if (o.paths.count(k)) out.push_back({ o.name, {}, {}, true });
     return out;
 }
 
